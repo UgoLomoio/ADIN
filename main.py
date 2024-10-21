@@ -20,10 +20,11 @@ import io
 import base64
 #import multiprocessing
 
+from plotly.graph_objs.layout import annotation
 from sklearn.metrics import confusion_matrix
 from torch.cuda import is_available
 from torch.utils.data import dataloader
-from adin import utils, ml, dl, preprocessing
+from adin import utils, ml, dl, preprocessing, gaan_config
 import plotly.graph_objects as go
 from dash import html, dcc
 import torch
@@ -33,6 +34,8 @@ import dash_cytoscape as cyto
 from dash import Dash, html, Input, Output, State, callback, dcc
 import json 
 from torch_geometric.explain import Explainer, GNNExplainer
+import traceback
+
 #from parallel_pandas import ParallelPandas
 
 # Dynamically determine the number of CPU cores
@@ -51,6 +54,7 @@ app.title = "Anomaly Detection in Individualized Networks"
 # Global variables to hold the data
 log_messages = deque(maxlen=1)  
 gene_data = None
+edge_index = None
 expr = None 
 targets = None
 patients = None
@@ -78,13 +82,13 @@ nodes = []
 edges = []
 explainer = None 
 node_mapping = None 
-map_edgeattr = None
 map_final = {0: "Normal", 1: "Anomalous"}
+gaan_params = None 
 
 
 analysis_options = {
     'ML': ['KNN', 'LR', 'DT', 'SVM', 'RF'], #['LDA', 'NB', 'KNN', 'LR', 'DT', 'SVM', 'RF']
-    'GAAN': ['GAAN']
+    'GAAN': ['GAAN_nodes', 'GAAN_ISNs']
 }
 
 reset_button = dbc.Button(
@@ -101,6 +105,75 @@ reset_button = dbc.Button(
     },
     n_clicks=0
 )
+
+gaan_params_layout = html.Div([
+
+    # Header
+    html.H2("GAAN Model Parameters"),
+
+    # Input for noise_dim (int)
+    html.Label("Noise Dimension (noise_dim):"),
+    dcc.Input(id='noise_dim', type='number', value=16, min=1, step=1),
+    html.Br(),
+
+    # Input for hid_dim (int)
+    html.Label("Hidden Dimension (hid_dim):"),
+    dcc.Input(id='hid_dim', type='number', value=64, min=1, step=1),
+    html.Br(),
+
+    # Input for num_layers (int)
+    html.Label("Number of Layers (num_layers):"),
+    dcc.Input(id='num_layers', type='number', value=4, min=1, step=1),
+    html.Br(),
+
+    # Input for dropout (float)
+    html.Label("Dropout Rate (dropout):"),
+    dcc.Input(id='dropout', type='number', value=0.1, min=0, max=1, step=0.01),
+    html.Br(),
+
+    # Input for contamination (float)
+    html.Label("Contamination (contamination):"),
+    dcc.Input(id='contamination', type='number', value=0.05, min=0.0, max=0.5, step=0.01),
+    html.Br(),
+
+    # Input for learning rate (lr)
+    html.Label("Learning Rate (lr):"),
+    dcc.Input(id='lr', type='number', value=0.004, step=0.0001),
+    html.Br(),
+
+    # Input for epoch (int)
+    html.Label("Number of Epochs (epoch):"),
+    dcc.Input(id='epoch', type='number', value=100, min=1, step=1),
+    html.Br(),
+
+    # Input for GPU index (gpu)
+    html.Label("GPU Index (gpu):"),
+    dcc.Input(id='gpu', type='number', value=-1, min=-1, step=1),
+    html.Br(),
+
+    # Input for batch_size (int)
+    html.Label("Batch Size (batch_size):"),
+    dcc.Input(id='batch_size', type='number', value=2, min=2, step=1),
+    html.Br(),
+
+    # Slider for verbosity (verbose)
+    html.Label("Verbosity Mode (verbose):"),
+    dcc.Slider(
+        id='verbose',
+        min=0,
+        max=3,
+        step=1,
+        value=1,
+        marks={i: str(i) for i in range(4)}
+    ),
+    html.Br(),
+
+    # Submit button
+    html.Button("Submit", id='submit-params-button', n_clicks=0),
+
+    # Placeholder for displaying the input values
+    html.Div(id='output-container')
+])
 
 navbar = dbc.NavbarSimple(
         children=[
@@ -149,35 +222,37 @@ footer = html.Footer([
                 #html.P("Anonymized Footer for peer-review"), 
 
                 html.Div([
-                    html.Img(src='/assets/unicz.png', style = {'right': '0%', 'width': '10%', 'height': '10%'}),
+                    html.Img(src='/assets/unicz.png', style = {'width': '100%', 'height': 'auto'}),
                 ], style = {
-                    'position': 'absolute',
+                    'width': '12%',  # Adjust the width of the image container
+                    'display': 'inline-block',
+                    'vertical-align': 'top',
                     'background-color': '#EBEBEB',
-                    'display': 'inline-block'}
-                ),
-
-                html.Div([
-                    html.Img(src='/assets/unical.png', style = {'left': '0%', 'width': '10%', 'height': '10%'}),  
-                    ], style = {
-                        'position': 'absolute',
-                        'background-color': '#EBEBEB',
-                        'display': 'inline-block'
                     }
                 ),
                 html.Div([
                     html.P(["Pietro Hiram Guzzi", html.Sup(1), ", Lomoio Ugo", html.Sup("1, 2"), ", Tommaso Mazza", html.Sup(3), " and Pierangelo Veltri", html.Sup(4), html.Br(), "(1) Magna Graecia University of Catanzaro, (2) Relatech SpA", html.Br(), "(3) IRCCS Casa Sollievo della Sofferenza, (4) University of Calabria Rende", html.Br()]),
                     ], style= {
-                        'position': 'absolute',
-                        'right': '10%',
-                        'left': '10%',
-                        'width': '80%',
-                        'height': '10%',
+                        'width': '70%',  # Adjust the width of the image container
+                        'vertical-align': 'middle',
                         'textAlign': 'center',
                         'background-color': '#EBEBEB',
                         'display': 'inline-block'
                     }
                 ),
-            ], style = {'width': '100%'})
+                html.Div([
+                    html.Img(src='/assets/unical.png', style = {'width': '100%', 'height': 'auto'}),  
+                    ], style = {
+                        'width': '18%',  # Adjust the width of the image container
+                        'display': 'inline-block',
+                        'vertical-align': 'top',
+                        'background-color': '#EBEBEB',
+                    }
+                ),
+            ], style = {'width': '100%',  # Ensure the row occupies full width
+                        'height': '10%',
+                        'textAlign': 'center',
+                        'background-color': '#EBEBEB'})
         ])
 
 
@@ -230,7 +305,6 @@ upload_layout = html.Div([
         dbc.Button("Download Preprocessed File", id="download-button", style=download_button_style, n_clicks=0),
         dcc.Download(id="download-csv"),
     ]),
-    #footer
 ])
 
 
@@ -246,6 +320,19 @@ modal = dbc.Modal(
                     is_open=False,
                     fullscreen=True
                 )
+
+modal_gaan = dbc.Modal(
+                    [
+                        dbc.ModalHeader(dbc.ModalTitle("Config Params")),
+                        dbc.ModalBody(gaan_params_layout),
+                        dbc.ModalFooter(
+                            dbc.Button("Close", id="close-modal-params", n_clicks=0)
+                        ),
+                    ],
+                    id="modal-gaan",
+                    is_open=False,
+                    fullscreen=True
+            )
 
 embedding_layout = html.Div([
     
@@ -264,7 +351,6 @@ embedding_layout = html.Div([
             type="circle"
         )
     ]),
-    #footer
 ])
 
 analysis_layout = html.Div([
@@ -274,15 +360,22 @@ analysis_layout = html.Div([
             id='analysis-method',
             options=[
                 {'label': 'ML Binary Classification', 'value': 'ML'},
-                {'label': 'GAAN Anomaly Detection', 'value': 'GAAN'}
+                {'label': 'GAAN Node Anomaly Detection', 'value': 'GAAN (nodes)'},
+                {'label': 'GAAN Graph Anomaly Detection', 'value': 'GAAN (ISNs)'}
             ],
             value='ML', 
             style={'position': 'absolute', 'top': '13%', 'left': '16%', 'width': '70%', 'textAlign': 'center'}
         ),
-        dbc.Button("Analyze", id='analyze-button', style={
-            'position': 'absolute', 'top': '13%', 'right': '3%', 'width': '8%', 
-            'height': '4%', 'textAlign': 'center', 'background-color': '#34B212'
-        }, n_clicks=0),
+        html.Div([
+            dbc.Button("Analyze", id='analyze-button', style={
+                'display': 'inline-block', 'textAlign': 'center', 'background-color': '#34B212'
+            }, n_clicks=0),
+            dbc.Button("Config GAAN", id='modal-params-button', disabled=True, style={
+                'display': 'inline-block','textAlign': 'center', 'background-color': '#34B212'
+            }, n_clicks=0),
+        ], style={'position':'absolute', 'left': '5%', 'display': 'inline-block'}),
+
+        modal_gaan,
         dcc.Loading(
             id="loading-analysis-output",
             children=[
@@ -293,7 +386,6 @@ analysis_layout = html.Div([
             type="circle"
         )
     ]),
-    #footer
 ])
 
 explainability_layout = html.Div([
@@ -316,7 +408,8 @@ explainability_layout = html.Div([
                 id='analysis-type',
                 options=[
                     {'label': 'ML Binary Classification', 'value': 'ML'},
-                    {'label': 'GAAN Anomaly Detection', 'value': 'GAAN'}
+                    {'label': 'GAAN Node Anomaly Detection', 'value': 'GAAN (nodes)'},
+                    {'label': 'GAAN Graph Anomaly Detection', 'value': 'GAAN (ISNs)'}
                 ],
                 value='ML', 
                 style={'position': 'absolute', 'top': '13%', 'left': '15%', 'width': '70%', 'textAlign': 'center'}
@@ -332,7 +425,6 @@ explainability_layout = html.Div([
             overlay_style={"visibility":"visible"},
             type="circle"
         )
-        #footer
 ])
 
 
@@ -343,7 +435,6 @@ homepage_layout = html.Div([
     html.Div(id='page-content'),#, children = footer),  # This is where page content will be dynamically inserted
     modal
 ])
-
 
 # Main app layout
 app.layout = homepage_layout
@@ -375,7 +466,7 @@ def upload_preprocessed_file(gene_file):
         except Exception as e:
             return html.Div([
                 html.P('There was an error processing this gene file.',
-                style = {'color': 'red', 'width': '100%', 'textAlign': 'center'})
+                style = {'color': 'red', 'width': '100%', 'textAlign': 'center'}),
             ])
         
         progress = 20
@@ -389,13 +480,14 @@ def upload_preprocessed_file(gene_file):
         except Exception as e:
             return html.Div([
                 html.P("'Target' column for patient binary diagnosis not found.",
-                style = {'color': 'red', 'width': '100%', 'textAlign': 'center'})
+                style = {'color': 'red', 'width': '100%', 'textAlign': 'center'}),
             ])
         
         progress = 40
         targets_uq = np.unique(targets['Target'].values)
         if len(targets_uq) > 2:
             raise Exception("Target column must have only 2 unique values to perform Anomaly Detection and Binary Classification. Found {} unique targets.".format(len(targets_uq)))
+
 
         df = expr.join(targets)
 
@@ -424,7 +516,8 @@ def upload_preprocessed_file(gene_file):
                     columns=columns,
                     page_size=10, 
                     style_table={'overflowY': 'auto', 'overflowX': 'scroll', 'height': '20%'},  # Scrollable table height
-                )
+                ),
+                footer 
         ])
     
 def upload_file(gene_file):
@@ -445,17 +538,25 @@ def upload_file(gene_file):
         decoded = base64.b64decode(content_string)
         try:
             # Assume that the user uploaded a CSV file
-            gene_data = utils.read_gene_expression(io.StringIO(decoded.decode('utf-8')))
+            skiprows, gene_data = utils.read_gene_expression(io.StringIO(decoded.decode('utf-8')))
         except Exception as e:
+            traceback_str = traceback.format_exc()
+    
             return html.Div([
-                html.P('There was an error processing this gene file.',
-                style = {'color': 'red', 'width': '100%', 'textAlign': 'center'})
+                html.P('There was an error processing this gene file. {} \n {}'.format(e, traceback_str),
+                style = {'color': 'red', 'width': '100%', 'textAlign': 'center'}),
             ])
         progress = 10
 
+        if skiprows == 0:
+            return html.Div([
+                html.P("There was an error processing this gene file. Can't find automatically a skiprow value to read the file",
+                style = {'color': 'red', 'width': '100%', 'textAlign': 'center'}), 
+            ])
+
         print("Detecting Geo accession code")
         add_log_message("Detecting Geo accession code")
-        geo_code = utils.find_geoaccession_code(io.StringIO(decoded.decode('utf-8')))
+        geo_code = utils.find_geoaccession_code(io.StringIO(decoded.decode('utf-8')), skiprows)
         if geo_code is None:
             raise Exception ("Cannot detect GEO accession code from file. File must be corrupted.")
         print("Detecting platforms")
@@ -471,30 +572,32 @@ def upload_file(gene_file):
         progress = 35
 
         print("Downloading annotation file")  
-        
         found_platform, annotation_df = utils.get_annotation_df(gse, expr, platforms)
         if found_platform is None:
             raise Exception ("Cannot detect any valid platforms from file. File must be corrupted.")
         targets = utils.get_targets(gene_data)
         progress = 50 
         
+        # Convert all columns to numeric, invalid entries become NaN
+        expr = expr.apply(pd.to_numeric, errors='coerce')
+
         #print("Expr:", expr)
         print("Targets:", targets)
         df = expr.join(targets)
     
         print("Preprocessing")
         add_log_message("Renaming columns & Replacing none values.")
+        #print(annotation_df.shape, annotation_df.columns)
         expr = preprocessing.preprocess(df, annotation_df, need_rename=True) 
         progress = 90
         #print("Preprocessed:", expr)
         
-
         if "Target" in expr.columns:
             expr = expr.drop("Target", axis=1)
         
         targets_uq = np.unique(targets['Target'].values)
         if len(targets_uq) > 2:
-            raise Exception("Target column must have only 2 unique values to perform Anomaly Detection and Binary Classification. Found {} unique targets.".format(len(targets_uq)))
+            raise Exception ("Target column must have only 2 unique values to perform Anomaly Detection and Binary Classification. Found {} unique targets.".format(len(targets_uq)))
        
         
         limited_expr = expr.iloc[:10, :50]
@@ -518,9 +621,9 @@ def upload_file(gene_file):
                     page_size=10, 
                     style_table={'overflowY': 'auto', 'overflowX': 'scroll', 'height': '20%'},  # Scrollable table height
                 ),
-                #footer
+                footer
         ])
-        #FIX PREPROCESSING
+
     
 def update_explainability_ml(model_name):
     
@@ -546,7 +649,8 @@ def update_explainability_ml(model_name):
                             html.P(
                                 "SHAP explanations are not available for SVM and KNN models due to high memory demands.",
                                 style={'color': 'red', 'fontWeight': 'bold'}
-                            )
+                            ),
+                            footer
                 ], style = {"position": "fixed", "top": "40%", 'width': "100%", 'textAlign': 'center'})
             elif model_name == "LR":
                 fig = ml.explain_model(model, model_name, X, genes, X_train=X_train) 
@@ -627,7 +731,8 @@ def update_explainability_ml(model_name):
                     html.Div([
                          ml.get_plot("force-plot", {}, model, model_name, X, ys, genes, index = 0, top_n = 10, X_train = X_train, class_id = y, title=plot_title)
                     ], id = 'force-plot-div', style = {"width": "100%"})
-                ])
+                ]),
+                footer
             ])
     
     return html.Div()
@@ -710,7 +815,7 @@ def update_explainability_dl(model_name):
                         stylesheet=default_stylesheet,
                         responsive=True
                     ),
-                    #footer
+                    footer
             ], style = {'position': "absolute", "width": "100%"})
             return div
         
@@ -767,7 +872,7 @@ def update_embeddings(update=False):
                                 )],       
                         style={'width': '100%', 'height': '20%'}
                         ),
-                        #footer
+                        footer
             ])
             saved_figures["pca-plot"] = fig_pca
             saved_figures["tsne-plot"] = fig_tsne
@@ -808,7 +913,7 @@ def update_embeddings(update=False):
                                 )],       
                         style={'top': '55%', 'width': '100%', 'height': '20%'}
                         ),
-                        #footer
+                        footer
                     ])
                 
                 return div 
@@ -838,12 +943,13 @@ def update_analysis_output():
     global config 
     global edge_list 
     global node_mapping
-    global map_edgeattr
     global explainer 
     global saved_figures 
 
-    if method_g == 'GAAN':
-        toprint = "Anomaly Detection"
+    if method_g == 'GAAN (nodes)':
+        toprint = "Node Anomaly Detection"
+    elif method_g == 'GAAN (ISNs)':
+        toprint = "Graph Anomaly Detaction"
     else:
         toprint = "Binary Classification"
     
@@ -940,25 +1046,35 @@ def update_analysis_output():
                                     html.Br(),
                                     dbc.Button("Popout Figure", id = "modal-confm",  n_clicks=0)
                                 ], style = {'display': 'inline-block'}),
-                            ])
-                            #footer
+                            ]),
+                            footer
                 ], style = {'width': '100%'})
         
-    elif method_g == 'GAAN':
+    elif method_g == 'GAAN (nodes)':
         
-        edges_i, edge_list, edge_weights, map_edgeattr = utils.get_edges_by_sim(expr)
+        print("Creating Graph from gene expression array")
+        if edge_index is None:
 
-        # Parse the edges and create node mapping
-        source_nodes, target_nodes, node_mapping = utils.parse_edges(edges_i)
-  
-        # Create edge_index tensor
-        edge_index = utils.create_edge_index(source_nodes, target_nodes)
+            edges_i, edge_list, _ = utils.get_edges_by_sim(expr)
+
+            # Parse the edges and create node mapping
+            source_nodes, target_nodes, node_mapping = utils.parse_edges(edges_i)
+        
+            print("Creating Dataloader")
+            # Create edge_index tensor
+        
+            edge_index = utils.create_edge_index(source_nodes, target_nodes)
+
         x = expr.values
         y = targets.values
-        mydataloader = dl.create_torch_geo_data(x, y, edge_index, edge_weights)
+        mydataloader = dl.create_torch_geo_data(x, y, edge_index)
         node_mapping_rev = {value: key for key, value in node_mapping.items()}
-        dataloader_train, dataloader_test = dl.train_test_split_and_mask(mydataloader, map_edgeattr, node_mapping_rev)
-        model = dl.train_gaan(dataloader_train)
+        print("Train - Test split")
+        dataloader_train, dataloader_test = dl.train_test_split_and_mask(mydataloader, node_mapping_rev, train_size = 0.6)
+        in_dim = dataloader_train.x.shape[1]
+        print("Create GAAN model")
+        model = dl.create_model(in_dim, gaan_params)
+        model = dl.train_gaan(model, dataloader_train)
         models["GAAN"] = model
         if "Temp" in models.keys():
             del models["Temp"]
@@ -1028,9 +1144,11 @@ def update_analysis_output():
 
                               ]),
    
-                              #footer
+                              footer
             ], style={'top': '18%', 'width': '100%'}
         ) 
+    else:
+        return dash.no_update #TO IMPLEMENT ISNs ANOMALY DETECTION 
 
 # Callback to update page content based on URL
 @app.callback(
@@ -1044,6 +1162,7 @@ def update_layout(pathname, n_clicks):
     global limited_expr
     global df_result
     global fig_pca
+    global edge_index
     global model_name 
     global method_g 
     global gene_data 
@@ -1067,10 +1186,10 @@ def update_layout(pathname, n_clicks):
     global nodes 
     global edges 
     global explainer 
-    global map_edgeattr
     global node_mapping
     global genes 
-
+    global gaan_params
+    
     # Debugging print statements
     
     print(f"Callback triggered with pathname: {pathname}")
@@ -1115,7 +1234,7 @@ def update_layout(pathname, n_clicks):
                                 page_size=10,
                                 style_table={'overflowY': 'auto', 'overflowX': 'scroll', 'height': '20%'},  # Scrollable table height
                             ), 
-                            #footer
+                            footer
                     ])
             
                 else: 
@@ -1130,6 +1249,8 @@ def update_layout(pathname, n_clicks):
             # Global variables to hold the data
             gene_data = None
             expr = None 
+            edge_index = None
+            gaan_params = None
             targets = None
             fig_pca = None
             fig_tsne = None
@@ -1157,20 +1278,23 @@ def update_layout(pathname, n_clicks):
             edges = []
             explainer = None 
             node_mapping = None 
-            map_edgeattr = None
+
             analysis_options = {
                 'ML': ['KNN', 'LR', 'DT', 'SVM', 'RF'], #['LDA', 'NB', 'KNN', 'LR', 'DT', 'SVM', 'RF']
-                'GAAN': ['GAAN']
+                'GAAN': ['GAAN (node)', 'GAAN (ISNs)']
             }
             
-            download_button_style = {   'position': 'absolute', 'bottom': '6%', 'left': '47%', 'width': '10%',
+            download_button_style = {'position': 'absolute', 'bottom': '6%', 'left': '47%', 'width': '10%',
                             'background-color': '#34B212', 'height': '8%', 'text-align': 'center', 'display':'none'}
             if pathname == "/upload":
                 return upload_layout
+
             elif pathname == "/embeddings":
                 return embedding_layout
+
             elif pathname == '/analysis':
                 return analysis_layout
+
             elif pathname == '/explain':
                 return explainability_layout
     
@@ -1258,7 +1382,9 @@ def update_upload_onclick(upload_nclicks, gene_file, preprocessed):
                         page_size=5,
                         style_table={'overflowY': 'auto', 'overflowX': 'scroll', 'height': '20%'}, # Scrollable table height
                     ),
-                    #footer
+                    dbc.Button("Download Preprocessed File", id="download-button", style=download_button_style, n_clicks=0),
+                    dcc.Download(id="download-csv"),
+                    footer
         ])
         return div, {'display': 'none'}, True, download_button_style
     
@@ -1335,6 +1461,33 @@ def toogle_modal_exp_ml(shapexp_n, shapsum_n, closemodal_n):
     else:
         is_open = False
     return fig, is_open
+
+
+# Callback to update page content based on upload file button clicks
+@app.callback(
+    Output("modal-gaan", "is_open"),
+    Input('modal-params-button', 'n_clicks'),
+    Input("close-modal-params", "n_clicks"),
+    prevent_initial_call=True  # Ensure callback doesn't run on load
+)
+def toogle_modal_gaan(open_n, close_n):
+
+    ctx = dash.callback_context
+    if not ctx.triggered:
+        button_id = 'No clicks yet'
+    else:
+        button_id = ctx.triggered[0]['prop_id'].split('.')[0]
+   
+    is_open = False 
+
+    if button_id == 'close-modal-params':
+        return False
+    elif button_id == 'modal-params-button':
+        is_open = True
+    else:
+        is_open = False
+    return is_open
+
 
 # Callback to update page content based on upload file button clicks
 @app.callback(
@@ -1465,7 +1618,7 @@ def toogle_modal_analysis_ml(boxp_n, roc_n, roctest_n, confm_n, closemodal_n):
 # Callback to update page content based on analyze button clicks
 @app.callback(
     Output('model-dropdown', 'options'),
-    Input("analysis-type", "value"),
+    Input("analysis-type", "value")
 )
 def update_dropdown_models(method):
     
@@ -1479,6 +1632,23 @@ def update_dropdown_models(method):
         return options
     else:
         return [{'label': None, 'value': None}]
+
+
+# Callback to update page content based on analyze button clicks
+@app.callback(
+    Output('modal-params-button', 'disabled'),
+    Input('analysis-method', 'value')
+)
+def update_visibility_modal(method):
+    
+    # Debugging print statements
+    print(f"Changing GAAN params modal visibility")
+
+    if "GAAN" in method:
+        return False
+    else:
+        return True
+  
 
 # Callback to update the file name
 @app.callback(
@@ -1546,7 +1716,8 @@ def update_embeddings_onclick(embeddings_nclicks):
                 html.Br(),
                 html.Br(),
                 html.P("Upload a gene expression file first.",
-                style = {'color': 'red', 'width': '100%', 'textAlign': 'center', 'fontWeight': 'bold'})
+                style = {'color': 'red', 'width': '100%', 'textAlign': 'center', 'fontWeight': 'bold'}),
+                footer
             ])
         return div 
 
@@ -1560,6 +1731,7 @@ def update_embeddings_onclick(embeddings_nclicks):
 def download_onclick(download_nclicks):
     
     global expr 
+    global targets 
 
     # Debugging print statements
     print(f"Button clicks - Download: {download_nclicks}")
@@ -1573,7 +1745,9 @@ def download_onclick(download_nclicks):
     
     if button_id == 'download-button':
         if expr is not None:
-            return dcc.send_data_frame(expr.to_csv, "preprocessed_data.csv")
+            #print(targets)
+            df = pd.concat([expr, targets], axis=1)
+            return dcc.send_data_frame(df.to_csv, "preprocessed_data.csv")
 
 
 # Callback to update page content based on analyze button clicks
@@ -1608,7 +1782,8 @@ def update_analyze_onclick(analyze_nclicks, method):
                 html.Br(),
                 html.Br(),
                 html.P("Upload a gene expression file first.",
-                style = {'color': 'red', 'width': '100%', 'textAlign': 'center', 'fontWeight': 'bold'})
+                style = {'color': 'red', 'width': '100%', 'textAlign': 'center', 'fontWeight': 'bold'}),
+                footer
             ])
             return div 
     return dash.no_update
@@ -1651,7 +1826,8 @@ def update_explain_onclick(explain_nclicks, model_name_in):
                 html.Br(),
                 html.Br(),
                 html.P("Upload a gene expression file first.",
-                style = {'color': 'red', 'width': '100%', 'textAlign': 'center', 'fontWeight': 'bold'})
+                style = {'color': 'red', 'width': '100%', 'textAlign': 'center', 'fontWeight': 'bold'}), 
+                footer 
             ])
         return div 
     return dash.no_update
@@ -1844,6 +2020,50 @@ def update_forceplot(patient_idx):
     
     return ml.get_plot("force-plot", {}, model, model_name, X, ys, genes, index = patient_idx, top_n = 10, X_train = X_train, class_id = y, title=plot_title)
 
+
+
+# Callback to handle the form submission and display selected values
+@app.callback(
+    Output('output-container', 'children'),
+    [Input('submit-params-button', 'n_clicks'),
+    Input('noise_dim', 'value'),
+    Input('hid_dim', 'value'),
+    Input('num_layers', 'value'),
+    Input('dropout', 'value'),
+    Input('contamination', 'value'),
+    Input('lr', 'value'),
+    Input('epoch', 'value'),
+    Input('gpu', 'value'),
+    Input('batch_size', 'value'),
+    Input('verbose', 'value')
+    ]
+)
+def update_gaan_params(n_clicks, noise_dim, hid_dim, num_layers, dropout, contamination, lr, epoch, gpu, batch_size, verbose):
+    
+    global gaan_params 
+
+    print("Saving GAAN params")
+
+    if n_clicks > 0:
+        
+        gaan_params = gaan_config.GAAN_config(noise_dim=noise_dim, hid_dim=hid_dim, num_layers=num_layers, dropout=dropout, contamination=contamination, lr = lr, epoch = epoch, gpu = gpu, batch_size=batch_size, verbose = verbose)
+        return html.Div([
+            html.H4("Submitted Parameters:"),
+            html.P(f"Noise Dimension: {noise_dim}"),
+            html.P(f"Hidden Dimension: {hid_dim}"),
+            html.P(f"Number of Layers: {num_layers}"),
+            html.P(f"Dropout Rate: {dropout}"),
+            html.P(f"Contamination: {contamination}"),
+            html.P(f"Learning Rate: {lr}"),
+            html.P(f"Number of Epochs: {epoch}"),
+            html.P(f"GPU Index: {gpu}"),
+            html.P(f"Batch Size: {batch_size}"),
+            html.P(f"Verbosity Mode: {verbose}")
+        ])
+    
+    return dash.no_update
+
+
 if __name__ == '__main__':
         
     print("Running ADIN")
@@ -1853,7 +2073,14 @@ if __name__ == '__main__':
 
 
 
+#MAYBE CAN'T DO: 
+##EXPLAINABILITY E DL: add only GraphSVX shap (CAN'T WORK ON GAAN I THINK)
 
-#EXPLAINABILITY E DL: add only GraphSVX shap 
-#fix preprocessing
-#FIX THE FOOTER
+
+#ON GOING:
+## SWITCH TO GAAN ISN:
+### A normal GAAN generates nodes (genes) and attributes (gene expression), 
+### edges are created using the pearson correlation: same as ISN-tractor
+
+#QUESTIONS TO MY SELF:
+##ANALYSIS: GAAN creation is slow, can we speed up edges computation?

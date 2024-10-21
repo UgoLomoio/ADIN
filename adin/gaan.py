@@ -16,13 +16,11 @@ import torch
 import warnings
 import torch.nn.functional as F
 from torch_geometric.nn import MLP
-from torch_geometric.utils import to_dense_adj
 import time
 from inspect import signature
 from abc import ABC, abstractmethod
 from torch_geometric.data import Data
 
-import torch
 import numpy as np
 from scipy.stats import binom
 from scipy.special import erf

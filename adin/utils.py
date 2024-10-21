@@ -1,4 +1,4 @@
-from sklearn.metrics import roc_curve, auc, roc_auc_score
+from sklearn.metrics import roc_curve, auc
 from sklearn.metrics import confusion_matrix, roc_auc_score, classification_report, accuracy_score, f1_score, recall_score, precision_score
 import torch 
 import numpy as np 
@@ -19,11 +19,11 @@ from plotly import graph_objects as go
 import GEOparse
 from torch.nn.functional import cosine_similarity
 
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
-def find_geoaccession_code(lines):
+def find_geoaccession_code(lines, skiprows):
     for i, line in enumerate(lines):  # Enumerate to count the lines
-        if i >= 28:  # Stop after reading 28 lines
+        if i >= skiprows:  # Stop after reading X lines
             break
         if "!Series_geo_accession" in line:
             geo_accession = line.split("\t")[1].strip().replace('"', "")
@@ -42,26 +42,34 @@ def get_annotation_df(gse, values_df, platforms):
 
     for platform in platforms:
 
-      print(platform)
-      # Get the platform object
-      gpl = gse.gpls[platform]
+        print(platform)
+        # Get the platform object
+        gpl = gse.gpls[platform]
+      
+        # Convert the platform object into a DataFrame
+        platform_df = gpl.table
+        columns_values = values_df.columns.to_list()
+        columns = platform_df["ID"].to_list()
+        
+        #print(columns[-10:], columns_values[-10:])
+        for column in columns_values:
+            if column in columns:
+                found_platform = platform
+                annotation_df = platform_df
+                break 
+        #else:
+        #    print(len(columns), len(columns_values))
+        #    print(type(columns), type(columns_values))
 
-      # Convert the platform object into a DataFrame
-      platform_df = gpl.table
-      columns_values = values_df.columns.to_list()
-      columns = platform_df["ID"].to_list()
-  
-      if columns_values == columns:
-        found_platform = platform
-        annotation_df = platform_df
-        break 
+    #if found_platform is None:
+    #   diff = np.setdiff1d(columns, columns_values)
+    #    print(diff)
     
     return found_platform, annotation_df
 
 def get_edges_by_sim(expr):
 
     exp_values = expr.values
-    map_edgeattr = {}
     edges_1 = []
     edge_list = []
     edge_weights = []
@@ -79,8 +87,8 @@ def get_edges_by_sim(expr):
                     edges_1.append(f"{expr.T.columns[i]}_{expr.T.columns[j]}")
                     edge_list.append((expr.T.columns[i], expr.T.columns[j]))
                     edge_weights.append(sim)
-                    map_edgeattr[f"{expr.T.columns[i]}_{expr.T.columns[j]}"] = sim
-    return edges_1, edge_list, edge_weights, map_edgeattr
+                    
+    return edges_1, edge_list, edge_weights
 
 
 def unzip_data(filepath):
@@ -114,8 +122,8 @@ def get_targets(dataframe):
     patients = []
     
     for index, row in enumerate(dataframe.iterrows()):
-
-        patient = row[1]["ID_REF"]
+        #print(row[0], row[1])
+        patient = row[1]["!Sample_geo_accession"]#["ID_REF"]
         label = row[0]
         if "healthy" in label.lower():
             y = "control"
@@ -134,9 +142,20 @@ def get_targets(dataframe):
     clinic.index.name = "sample"
     return clinic
 
+
+def find_values_id(dataframe):
+
+    columns = dataframe.columns
+    for idx, column in enumerate(columns):
+        if column == "ID_REF":
+            values_id = idx+1
+            break
+    return values_id
+
 def get_expressions(dataframe):
     
-    values_id = 36
+    values_id = find_values_id(dataframe)
+    print("Values id: ", values_id)
     values_columns = dataframe.columns[values_id:-1]
     values = np.array(dataframe[values_columns].values)
     
@@ -154,9 +173,24 @@ def read_human_metilation(filepath):
     df = pd.read_csv(filepath, index_col = 0, skiprows=7)
     return df
 
+def get_skiprows(filepath):
+    filepath.seek(0)
+    lines = filepath.readlines()
+    skiprows = 0
+    for idx, line in enumerate(lines):
+        #if idx < 40:
+        #    print(idx, line.split("\t"))
+        if len(line.split("\t")) == 1:
+            skiprows = idx
+            break
+    return skiprows
+
 def read_gene_expression(filepath):
-    df = pd.read_csv(filepath, index_col = 0, skiprows=28, sep = "\t").T
-    return df 
+    skiprows = get_skiprows(filepath)
+    print("Skiprows: ", skiprows)
+    filepath.seek(0)
+    df = pd.read_csv(filepath, index_col = 0, skiprows=skiprows, sep = "\t", on_bad_lines='warn').T
+    return skiprows, df 
 
 def dense_isn(
     data,
